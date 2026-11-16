@@ -1,0 +1,6 @@
+blur_seq
+blur_par
+
+# Frames gerados para a avaliação de desempenho (grandes; recriados por benchmark/gerar_frames.py)
+benchmark/frames/
+__pycache__/
