@@ -58,41 +58,27 @@ mpicc -O2 -o blur_par paralelo.c
 mpirun -np 4 ./blur_par 100 saida_par frame1.pgm frame2.pgm
 ```
 
-Opções do paralelo:
-
-| Opção | Significado | Padrão |
-| ----- | ----------- | ------ |
-| `-np P` (do `mpirun`) | número de processos | - |
-| `-b B` | iterações por rodada = linhas de halo (1 = trocar a cada iteração) | 4 |
-| `-v PASTA` | teste de corretude: compara a saída com a do sequencial em `PASTA` | desligado |
-
 Se pedir mais processos do que núcleos, use `mpirun --oversubscribe -np P ...`.
 
-Sequencial: `-b` usa o filtro básico (9 leituras por pixel) em vez do otimizado.
+## Teste de corretude
 
-## Teste de corretude (só roda quando você pedir)
+As imagens geradas pelas duas versões devem ser idênticas:
 
 ```bash
-./blur_seq 100 ref frame1.pgm frame2.pgm
-mpirun -np 4 ./blur_par -v ref 100 saida_par frame1.pgm frame2.pgm
+./blur_seq 100 saida_seq frame1.pgm frame2.pgm
+mpirun -np 4 ./blur_par 100 saida_par frame1.pgm frame2.pgm
+diff -r saida_seq saida_par && echo iguais
 ```
-
-Depois de medir o tempo, o processo 0 compara cada `blur_NNNN.pgm` gerado com o
-do sequencial (pixel a pixel) e imprime quantos pixels diferem. O código de
-saída é 1 se houver diferença. Também dá para comparar com `cmp` e pelo
-`Checksum do resultado`, que é igual nas duas versões.
 
 ## Como o paralelo funciona
 
 - A imagem é dividida em faixas de linhas, uma por processo (decomposição de domínio).
 - O processo 0 lê o frame, envia as faixas (`MPI_Send`/`MPI_Recv`), calcula a
   sua, recebe as faixas prontas e grava a imagem.
-- Cada processo guarda também linhas de **halo** (cópias das linhas dos
-  vizinhos). Os halos são trocados no início de cada rodada de B iterações
-  (`MPI_Send`/`MPI_Recv`, ordem escolhida para não haver deadlock).
-- **Bloqueio temporal**: dentro de uma rodada, cada iteração calcula 1 linha a
-  menos em cada ponta do halo (trabalho redundante), e assim B iterações
-  são feitas com uma única troca de mensagens.
+- Cada processo guarda também uma linha de **halo** em cima e outra embaixo
+  (cópias da última linha do vizinho de cima e da primeira do vizinho de
+  baixo). Antes de cada iteração os vizinhos trocam essas linhas
+  (`MPI_Send`/`MPI_Recv`, em uma ordem que evita deadlock).
 - Sincronização: `MPI_Bcast` (dimensões e aviso de erro), `MPI_Barrier`
   (início e fim do cronômetro) e a troca de halos entre vizinhos.
 - Resultado idêntico bit a bit ao do sequencial.

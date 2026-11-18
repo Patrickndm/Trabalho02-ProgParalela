@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Gera os gráficos (PDF e PNG) e o resumo em texto a partir de resultados/tempos.csv.
-# Uso: python3 gerar_graficos.py [--resultados PASTA] [--b-padrao 4]
+# Uso: python3 gerar_graficos.py [--resultados PASTA]
 # Requer: numpy e matplotlib.
 
 import argparse
@@ -15,14 +15,14 @@ import numpy as np
 
 
 def ler_tempos(caminho):
-    """Lê tempos.csv e devolve {(programa, resolucao, processos, bloco): [tempos]}."""
+    """Lê tempos.csv e devolve {(programa, resolucao, processos): [tempos]}."""
     dados = defaultdict(list)
     larguras = {}
     with open(caminho, newline="") as arquivo:
         for linha in csv.DictReader(arquivo):
             resolucao = linha["resolucao"]
             larguras[resolucao] = int(linha["largura"]) * int(linha["altura"])
-            chave = (linha["programa"], resolucao, int(linha["processos"]), int(linha["bloco"]))
+            chave = (linha["programa"], resolucao, int(linha["processos"]))
             dados[chave].append(float(linha["tempo_s"]))
     return dados, larguras
 
@@ -37,7 +37,6 @@ def salvar(figura, pasta, nome):
 def main():
     analisador = argparse.ArgumentParser()
     analisador.add_argument("--resultados", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "resultados"))
-    analisador.add_argument("--b-padrao", type=int, default=4)
     argumentos = analisador.parse_args()
 
     dados, pixels = ler_tempos(os.path.join(argumentos.resultados, "tempos.csv"))
@@ -46,7 +45,6 @@ def main():
 
     resolucoes = sorted(pixels, key=lambda r: pixels[r])
     todos_processos = sorted({chave[2] for chave in dados if chave[0] == "paralelo"})
-    p_max = max(todos_processos)
 
     def media(chave):
         return float(np.mean(dados[chave]))
@@ -56,19 +54,19 @@ def main():
 
     linhas_resumo = []
 
-    # ---- Escalabilidade: tempo, speedup e eficiência x processos (B = b_padrao) ----
+    # ---- Tempo, speedup e eficiência x processos ----
     series = {}
     for resolucao in resolucoes:
-        tempo_seq = media(("sequencial", resolucao, 1, 0))
-        processos_lista = [p for p in todos_processos if ("paralelo", resolucao, p, argumentos.b_padrao) in dados]
-        tempos = [media(("paralelo", resolucao, p, argumentos.b_padrao)) for p in processos_lista]
-        desvios = [desvio(("paralelo", resolucao, p, argumentos.b_padrao)) for p in processos_lista]
+        tempo_seq = media(("sequencial", resolucao, 1))
+        processos_lista = [p for p in todos_processos if ("paralelo", resolucao, p) in dados]
+        tempos = [media(("paralelo", resolucao, p)) for p in processos_lista]
+        desvios = [desvio(("paralelo", resolucao, p)) for p in processos_lista]
         series[resolucao] = (tempo_seq, processos_lista, tempos, desvios)
         for p, t, d in zip(processos_lista, tempos, desvios):
             linhas_resumo.append(
-                f"{resolucao:>10}  P={p:<3} B={argumentos.b_padrao:<2} tempo {t:8.3f} s (±{d:.3f})  "
+                f"{resolucao:>10}  P={p:<3} tempo {t:8.3f} s (±{d:.3f})  "
                 f"speedup {tempo_seq / t:6.2f}  eficiência {tempo_seq / t / p * 100:6.1f}%")
-        linhas_resumo.append(f"{resolucao:>10}  sequencial: {tempo_seq:.3f} s (±{desvio(('sequencial', resolucao, 1, 0)):.3f})")
+        linhas_resumo.append(f"{resolucao:>10}  sequencial: {tempo_seq:.3f} s (±{desvio(('sequencial', resolucao, 1)):.3f})")
         linhas_resumo.append("")
 
     figura, eixo = plt.subplots(figsize=(7, 4.5))
@@ -104,26 +102,6 @@ def main():
     eixo.grid(True, alpha=0.3)
     eixo.legend(title="Resolução")
     salvar(figura, pasta_graficos, "eficiencia")
-
-    # ---- Bloqueio temporal: P = p_max, variando B ----
-    figura, eixo = plt.subplots(figsize=(7, 4.5))
-    linhas_resumo.append(f"Bloqueio temporal (P = {p_max}):")
-    for resolucao in resolucoes:
-        tempo_seq = media(("sequencial", resolucao, 1, 0))
-        blocos = sorted({chave[3] for chave in dados if chave[0] == "paralelo" and chave[1] == resolucao and chave[2] == p_max})
-        if len(blocos) < 2:
-            continue
-        speedups = [tempo_seq / media(("paralelo", resolucao, p_max, b)) for b in blocos]
-        eixo.plot(blocos, speedups, marker="o", label=resolucao)
-        for b, s in zip(blocos, speedups):
-            linhas_resumo.append(f"{resolucao:>10}  B={b:<3} speedup {s:6.2f}")
-    eixo.set_xscale("log", base=2)
-    eixo.set_xlabel("Iterações por rodada (B = linhas de halo)")
-    eixo.set_ylabel("Speedup")
-    eixo.set_title(f"Efeito do bloqueio temporal ({p_max} processos)")
-    eixo.grid(True, alpha=0.3)
-    eixo.legend(title="Resolução")
-    salvar(figura, pasta_graficos, "bloco")
 
     # ---- Corretude ----
     caminho_corretude = os.path.join(argumentos.resultados, "corretude.csv")

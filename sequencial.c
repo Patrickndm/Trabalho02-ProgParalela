@@ -9,8 +9,7 @@
 // Patrick Nelson de Morais - RA 130166
 
 // Compilação: gcc -O2 -o blur_seq sequencial.c  (ou make)
-// Uso: ./blur_seq [-b] iteracoes pasta_saida frame0.pgm frame1.pgm ...
-//   -b usa o filtro básico (9 leituras por pixel) em vez do otimizado
+// Uso: ./blur_seq iteracoes pasta_saida frame0.pgm frame1.pgm ...
 
 // Cada pixel interno recebe (soma dos 9 vizinhos + 4) / 9 e a borda da imagem
 // não muda. Cada iteração lê de um buffer e escreve em outro.
@@ -18,8 +17,6 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
-#include <getopt.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,9 +30,6 @@
 #else
 #define CRIAR_PASTA(caminho) mkdir(caminho, 0755)
 #endif
-
-#define MODO_BASICO 0
-#define MODO_OTIMIZADO 1
 
 // Imagem em tons de cinza, pixel (l, c) em pixels[l * largura + c]
 typedef struct {
@@ -52,41 +46,12 @@ Imagem ler_pgm(const char *caminho) {
         exit(1);
     }
 
-    char assinatura[3];
-    if (fscanf(arquivo, "%2s", assinatura) != 1 || strcmp(assinatura, "P5") != 0) {
-        fprintf(stderr, "%s não é um PGM P5\n", caminho);
-        exit(1);
-    }
-
     int largura, altura, valor_maximo;
-    int caractere;
-    // Pula espaços e comentários antes das dimensões
-    while (1) {
-        caractere = fgetc(arquivo);
-        if (caractere == EOF) {
-            fprintf(stderr, "Cabeçalho inválido em %s\n", caminho);
-            exit(1);
-        }
-        if (caractere == '#') {
-            do {
-                caractere = fgetc(arquivo);
-            } while (caractere != '\n' && caractere != EOF);
-        } else if (caractere != ' ' && caractere != '\t' && caractere != '\n' && caractere != '\r') {
-            break;
-        }
-    }
-    ungetc(caractere, arquivo);
-
-    if (fscanf(arquivo, "%d %d %d", &largura, &altura, &valor_maximo) != 3) {
-        fprintf(stderr, "Cabeçalho inválido em %s\n", caminho);
+    if (fscanf(arquivo, "P5 %d %d %d", &largura, &altura, &valor_maximo) != 3 || valor_maximo != 255) {
+        fprintf(stderr, "%s não é um PGM P5 de 8 bits\n", caminho);
         exit(1);
     }
     fgetc(arquivo); // \n depois do cabeçalho
-
-    if (largura <= 0 || altura <= 0 || valor_maximo != 255) {
-        fprintf(stderr, "PGM não suportado: %s\n", caminho);
-        exit(1);
-    }
 
     unsigned char *pixels = malloc((size_t)largura * altura);
     if (!pixels) {
@@ -114,38 +79,10 @@ void escrever_pgm(const char *caminho, const unsigned char *pixels, int largura,
     fclose(arquivo);
 }
 
-// Hash FNV-1a do resultado, para comparar com a versão paralela
-uint32_t atualizar_checksum(uint32_t hash, const unsigned char *pixels, size_t total_pixels) {
-    for (size_t posicao = 0; posicao < total_pixels; posicao++) {
-        hash ^= pixels[posicao];
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-// Uma iteração do blur somando os 9 vizinhos diretamente. A borda não é
-// escrita porque os dois buffers já começam com ela.
-void filtro_basico_uma_iteracao(const unsigned char *origem, unsigned char *destino, int largura, int altura) {
-    if (altura < 3 || largura < 3) {
-        return;
-    }
-
-    for (int linha = 1; linha < altura - 1; linha++) {
-        for (int coluna = 1; coluna < largura - 1; coluna++) {
-            int soma_vizinhanca = 0;
-            for (int linha_vizinha = linha - 1; linha_vizinha <= linha + 1; linha_vizinha++) {
-                for (int coluna_vizinha = coluna - 1; coluna_vizinha <= coluna + 1; coluna_vizinha++) {
-                    soma_vizinhanca += origem[linha_vizinha * largura + coluna_vizinha];
-                }
-            }
-            destino[linha * largura + coluna] = (unsigned char)((soma_vizinhanca + 4) / 9);
-        }
-    }
-}
-
-// Mesmo resultado do básico, mas reaproveita as somas das colunas para ler
-// 3 pixels por ponto em vez de 9.
-void filtro_otimizado_uma_iteracao(const unsigned char *origem, unsigned char *destino, int largura, int altura) {
+// Uma iteração do blur. Reaproveita as somas das colunas para ler 3 pixels
+// por ponto em vez de 9. A borda não é escrita porque os dois buffers já
+// começam com ela.
+void filtro_uma_iteracao(const unsigned char *origem, unsigned char *destino, int largura, int altura) {
     if (altura < 3 || largura < 3) {
         return;
     }
@@ -170,54 +107,17 @@ void filtro_otimizado_uma_iteracao(const unsigned char *origem, unsigned char *d
     }
 }
 
-// Executa as N iterações alternando entre os dois buffers. Recebe ponteiros
-// para os buffers porque, ao final, o resultado precisa estar em *ponteiro_atual.
-void executar_blur(
-    unsigned char **ponteiro_atual,
-    unsigned char **ponteiro_novo,
-    int largura,
-    int altura,
-    int num_iteracoes,
-    int modo) {
-    unsigned char *buffer_atual = *ponteiro_atual;
-    unsigned char *buffer_novo = *ponteiro_novo;
-
+// Executa as N iterações alternando entre os dois buffers, que precisam
+// começar iguais. Retorna o buffer que ficou com o resultado.
+unsigned char *executar_blur(unsigned char *buffer_atual, unsigned char *buffer_novo, int largura, int altura, int num_iteracoes) {
     for (int iteracao = 0; iteracao < num_iteracoes; iteracao++) {
-        if (modo == MODO_OTIMIZADO) {
-            filtro_otimizado_uma_iteracao(buffer_atual, buffer_novo, largura, altura);
-        } else {
-            filtro_basico_uma_iteracao(buffer_atual, buffer_novo, largura, altura);
-        }
+        filtro_uma_iteracao(buffer_atual, buffer_novo, largura, altura);
 
         unsigned char *ponteiro_temporario = buffer_atual;
         buffer_atual = buffer_novo;
         buffer_novo = ponteiro_temporario;
     }
-
-    *ponteiro_atual = buffer_atual;
-    *ponteiro_novo = buffer_novo;
-}
-
-typedef struct {
-    unsigned char *buffer_atual;
-    unsigned char *buffer_novo;
-} AreaTrabalho;
-
-// Copia o frame para os dois buffers (para a borda ficar certa nos dois) e
-// aplica o blur. O resultado fica em area->buffer_atual.
-void calcular_frame(Imagem *frame, AreaTrabalho *area, int num_iteracoes, int modo) {
-    size_t total_pixels = (size_t)frame->largura * frame->altura;
-
-    memcpy(area->buffer_atual, frame->pixels, total_pixels);
-    memcpy(area->buffer_novo, frame->pixels, total_pixels);
-
-    executar_blur(
-        &area->buffer_atual,
-        &area->buffer_novo,
-        frame->largura,
-        frame->altura,
-        num_iteracoes,
-        modo);
+    return buffer_atual;
 }
 
 // Instante atual em segundos
@@ -228,25 +128,15 @@ double agora(void) {
 }
 
 int main(int argc, char **argv) {
-    int modo = MODO_OTIMIZADO;
-    int opcao;
-    int opcoes_validas = 1;
-    while ((opcao = getopt(argc, argv, "b")) != -1) {
-        if (opcao == 'b') {
-            modo = MODO_BASICO;
-        } else {
-            opcoes_validas = 0;
-        }
-    }
-    int num_frames = argc - optind - 2;
-    if (!opcoes_validas || num_frames < 1) {
-        fprintf(stderr, "Uso: %s [-b] iteracoes pasta_saida frame0.pgm frame1.pgm ...\n", argv[0]);
+    int num_frames = argc - 3;
+    if (num_frames < 1) {
+        fprintf(stderr, "Uso: %s iteracoes pasta_saida frame0.pgm frame1.pgm ...\n", argv[0]);
         return 1;
     }
 
-    int num_iteracoes = atoi(argv[optind]);
-    const char *pasta_saida = argv[optind + 1];
-    char **caminhos_frames = argv + optind + 2;
+    int num_iteracoes = atoi(argv[1]);
+    const char *pasta_saida = argv[2];
+    char **caminhos_frames = argv + 3;
 
     if (num_iteracoes <= 0) {
         fprintf(stderr, "iteracoes precisa ser um inteiro positivo\n");
@@ -270,15 +160,9 @@ int main(int argc, char **argv) {
     int altura = frame.altura;
     size_t total_pixels = (size_t)largura * altura;
 
-    AreaTrabalho area; // Reaproveitada em todos os frames
-    area.buffer_atual = malloc(total_pixels);
-    area.buffer_novo = malloc(total_pixels);
-    if (!area.buffer_atual || !area.buffer_novo) {
-        fprintf(stderr, "Erro de alocação\n");
-        return 1;
-    }
-
-    uint32_t checksum = 2166136261u;
+    // Buffers reaproveitados em todos os frames
+    unsigned char *buffer_a = malloc(total_pixels);
+    unsigned char *buffer_b = malloc(total_pixels);
 
     for (int indice = 0; indice < num_frames; indice++) {
         if (indice > 0) {
@@ -292,30 +176,30 @@ int main(int argc, char **argv) {
         }
 
         inicio = agora();
-        calcular_frame(&frame, &area, num_iteracoes, modo);
+        memcpy(buffer_a, frame.pixels, total_pixels);
+        memcpy(buffer_b, frame.pixels, total_pixels);
+        unsigned char *resultado = executar_blur(buffer_a, buffer_b, largura, altura, num_iteracoes);
         tempo_calculo += agora() - inicio;
 
         inicio = agora();
         char caminho[4096];
         snprintf(caminho, sizeof(caminho), "%s/blur_%04d.pgm", pasta_saida, indice);
-        escrever_pgm(caminho, area.buffer_atual, largura, altura);
+        escrever_pgm(caminho, resultado, largura, altura);
         tempo_escrita += agora() - inicio;
 
-        checksum = atualizar_checksum(checksum, area.buffer_atual, total_pixels);
         free(frame.pixels);
     }
 
     double tempo_total = agora() - instante_inicio;
     printf("Frames: %d de %dx%d pixels\n", num_frames, largura, altura);
-    printf("Vídeo processado em %.6f s (%d frames, modo %s, %d iterações, %.2f frames/s)\n",
-        tempo_total, num_frames, modo == MODO_OTIMIZADO ? "otimizado" : "básico", num_iteracoes, num_frames / tempo_total);
+    printf("Vídeo processado em %.6f s (%d frames, %d iterações, %.2f frames/s)\n",
+        tempo_total, num_frames, num_iteracoes, num_frames / tempo_total);
     printf("Tempos: leitura %.3f s, cálculo %.3f s, escrita %.3f s\n",
         tempo_leitura, tempo_calculo, tempo_escrita);
-    printf("Checksum do resultado: %08x\n", (unsigned)checksum);
     printf("Imagens salvas em %s/blur_*.pgm\n", pasta_saida);
 
-    free(area.buffer_atual);
-    free(area.buffer_novo);
+    free(buffer_a);
+    free(buffer_b);
 
     return 0;
 }

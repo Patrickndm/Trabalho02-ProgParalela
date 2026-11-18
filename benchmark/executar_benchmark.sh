@@ -4,19 +4,15 @@
 # Etapas:
 #   1) compila (make) e gera as sequências de frames, se ainda não existirem;
 #   2) grava as informações da máquina em resultados/ambiente.txt;
-#   3) teste de corretude: em cada resolução, o paralelo (em cada número de
-#      processos e cada bloco) compara os seus arquivos com os do sequencial
-#      (opção -v do paralelo) -> resultados/corretude.csv;
+#   3) teste de corretude: em cada resolução, compara (diff) as imagens do
+#      paralelo, com cada número de processos, com as do sequencial
+#      -> resultados/corretude.csv;
 #   4) medição: para cada resolução, uma execução de aquecimento descartada e
-#      depois REPETICOES rodadas; em cada rodada roda o sequencial e o paralelo
-#      em cada configuração (resultados/tempos.csv). As rodadas são intercaladas
-#      para que variações da máquina afetem todas as configurações por igual.
+#      depois REPETICOES rodadas. Em cada rodada roda o sequencial e o paralelo
+#      com cada número de processos (resultados/tempos.csv). As rodadas são
+#      intercaladas para que variações da máquina afetem todas por igual.
 #
 # O tempo medido é o total do programa (leitura + cálculo + escrita), igual nos dois.
-#
-# Configurações do paralelo:
-#   - escalabilidade: P processos para cada P em PROCESSOS, com bloco B_PADRAO;
-#   - bloqueio temporal: P = P_MAX processos com cada B em BLOCOS.
 #
 # Os parâmetros podem ser trocados por variáveis de ambiente, por exemplo:
 #   REPETICOES=1 RESOLUCOES="640x480" PROCESSOS="1 2 4" ./executar_benchmark.sh
@@ -30,11 +26,8 @@ FRAMES_POR_VIDEO=${FRAMES_POR_VIDEO:-16}
 PROCESSOS=${PROCESSOS:-"1 2 4 8 12 16"}
 REPETICOES=${REPETICOES:-5}
 ITERACOES_CORRETUDE=${ITERACOES_CORRETUDE:-50}
-B_PADRAO=${B_PADRAO:-4}
-BLOCOS=${BLOCOS:-"1 2 4 8 16"}
 
 NUCLEOS_LOGICOS=$(nproc)
-P_MAX=${P_MAX:-$NUCLEOS_LOGICOS}
 
 PASTA_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAIZ="$(dirname "$PASTA_SCRIPT")"
@@ -91,47 +84,38 @@ echo "== Registrando o ambiente em $RESULTADOS/ambiente.txt"
     mpirun --version | head -1
     echo "Flags: $(sed -n 's/^CFLAGS *= *//p' "$RAIZ/Makefile")"
     echo
-    echo "Parâmetros: RESOLUCOES=\"$RESOLUCOES\" ITERACOES=\"$ITERACOES\" FRAMES_POR_VIDEO=$FRAMES_POR_VIDEO REPETICOES=$REPETICOES B_PADRAO=$B_PADRAO BLOCOS=\"$BLOCOS\" PROCESSOS=\"$PROCESSOS\" P_MAX=$P_MAX"
+    echo "Parâmetros: RESOLUCOES=\"$RESOLUCOES\" ITERACOES=\"$ITERACOES\" FRAMES_POR_VIDEO=$FRAMES_POR_VIDEO REPETICOES=$REPETICOES PROCESSOS=\"$PROCESSOS\""
 } > "$RESULTADOS/ambiente.txt"
 
-# Lista de configurações PROCESSOS:BLOCO, sem repetir
-configuracoes=""
-for processos in $PROCESSOS; do configuracoes+=" $processos:$B_PADRAO"; done
-for bloco in $BLOCOS; do
-    if [[ " $configuracoes " != *" $P_MAX:$bloco "* ]]; then configuracoes+=" $P_MAX:$bloco"; fi
-done
-configuracoes=${configuracoes# }
-
 # ---------- 3) Corretude ----------
-echo "== Teste de corretude (K=$ITERACOES_CORRETUDE): o paralelo compara os seus arquivos com os do sequencial (-v)"
-echo "resolucao,processos,bloco,resultado" > "$RESULTADOS/corretude.csv"
+echo "== Teste de corretude (K=$ITERACOES_CORRETUDE): compara as imagens do paralelo com as do sequencial"
+echo "resolucao,processos,resultado" > "$RESULTADOS/corretude.csv"
 for resolucao in $RESOLUCOES; do
     mapfile -t frames < <(frames_video "$resolucao")
     rm -rf "$TEMPORARIOS/sequencial"
     "$SEQ" "$ITERACOES_CORRETUDE" "$TEMPORARIOS/sequencial" "${frames[@]}" > /dev/null
-    for configuracao in $configuracoes; do
-        processos=${configuracao%%:*}
-        bloco=${configuracao#*:}
+    for processos in $PROCESSOS; do
         rm -rf "$TEMPORARIOS/paralelo"
-        if executar_paralelo "$processos" -b "$bloco" -v "$TEMPORARIOS/sequencial" "$ITERACOES_CORRETUDE" "$TEMPORARIOS/paralelo" "${frames[@]}" > /dev/null; then
+        executar_paralelo "$processos" "$ITERACOES_CORRETUDE" "$TEMPORARIOS/paralelo" "${frames[@]}" > /dev/null
+        if diff -r -q "$TEMPORARIOS/sequencial" "$TEMPORARIOS/paralelo" > /dev/null; then
             resultado=OK
         else
             resultado=FALHOU
         fi
-        echo "$resolucao,$processos,$bloco,$resultado" >> "$RESULTADOS/corretude.csv"
-        printf '  %-10s %2s processos, B=%-2s: %s\n' "$resolucao" "$processos" "$bloco" "$resultado"
+        echo "$resolucao,$processos,$resultado" >> "$RESULTADOS/corretude.csv"
+        printf '  %-10s %2s processos: %s\n' "$resolucao" "$processos" "$resultado"
     done
 done
 
 # ---------- 4) Medição ----------
 total=0
 for resolucao in $RESOLUCOES; do for k in $ITERACOES; do
-    total=$(( total + REPETICOES * (1 + $(wc -w <<< "$configuracoes")) ))
+    total=$(( total + REPETICOES * (1 + $(wc -w <<< "$PROCESSOS")) ))
 done; done
 
-echo "== Medição de tempos ($total execuções; configurações processos:bloco: $configuracoes)"
+echo "== Medição de tempos ($total execuções; processos: $PROCESSOS)"
 arquivo_csv="$RESULTADOS/tempos.csv"
-echo "programa,resolucao,largura,altura,iteracoes,frames,processos,bloco,repeticao,tempo_s" > "$arquivo_csv"
+echo "programa,resolucao,largura,altura,iteracoes,frames,processos,repeticao,tempo_s" > "$arquivo_csv"
 feitas=0
 inicio_geral=$(date +%s)
 
@@ -145,20 +129,18 @@ for resolucao in $RESOLUCOES; do
         # Aquecimento (descartado): carrega os arquivos no cache do sistema e
         # tira o processador do estado de economia de energia
         "$SEQ" "$k" "$TEMPORARIOS/saida" "${frames[@]}" > /dev/null
-        executar_paralelo "$P_MAX" -b "$B_PADRAO" "$k" "$TEMPORARIOS/saida" "${frames[@]}" > /dev/null
+        executar_paralelo "$NUCLEOS_LOGICOS" "$k" "$TEMPORARIOS/saida" "${frames[@]}" > /dev/null
 
         for repeticao in $(seq 1 "$REPETICOES"); do
             rm -rf "$TEMPORARIOS/saida"
             tempo=$("$SEQ" "$k" "$TEMPORARIOS/saida" "${frames[@]}" | extrair_tempo)
-            echo "sequencial,$resolucao,$largura,$altura,$k,$num_frames,1,0,$repeticao,$tempo" >> "$arquivo_csv"
+            echo "sequencial,$resolucao,$largura,$altura,$k,$num_frames,1,$repeticao,$tempo" >> "$arquivo_csv"
             feitas=$(( feitas + 1 ))
 
-            for configuracao in $configuracoes; do
-                processos=${configuracao%%:*}
-                bloco=${configuracao#*:}
+            for processos in $PROCESSOS; do
                 rm -rf "$TEMPORARIOS/saida"
-                tempo=$(executar_paralelo "$processos" -b "$bloco" "$k" "$TEMPORARIOS/saida" "${frames[@]}" | extrair_tempo)
-                echo "paralelo,$resolucao,$largura,$altura,$k,$num_frames,$processos,$bloco,$repeticao,$tempo" >> "$arquivo_csv"
+                tempo=$(executar_paralelo "$processos" "$k" "$TEMPORARIOS/saida" "${frames[@]}" | extrair_tempo)
+                echo "paralelo,$resolucao,$largura,$altura,$k,$num_frames,$processos,$repeticao,$tempo" >> "$arquivo_csv"
                 feitas=$(( feitas + 1 ))
             done
 
