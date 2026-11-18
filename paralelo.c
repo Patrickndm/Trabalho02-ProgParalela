@@ -1,4 +1,4 @@
-// Filtro de Blur 3x3 Iterado - versão PARALELA com MPI (OpenMPI)
+// Filtro de Blur 3x3 Iterado - versão paralela com MPI (OpenMPI)
 // Universidade Estadual de Maringá (UEM)
 // Curso: Ciência da Computação (CC)
 // Disciplina: Programação Paralela - DIN12041
@@ -93,7 +93,7 @@ int ler_pgm(const char *caminho, Imagem *imagem) {
 
     char assinatura[3];
     if (fscanf(arquivo, "%2s", assinatura) != 1 || strcmp(assinatura, "P5") != 0) {
-        fprintf(stderr, "Formato inválido em %s (esperado P5)\n", caminho);
+        fprintf(stderr, "%s não é um PGM P5\n", caminho);
         fclose(arquivo);
         return 0;
     }
@@ -104,13 +104,14 @@ int ler_pgm(const char *caminho, Imagem *imagem) {
     while (1) {
         caractere = fgetc(arquivo);
         if (caractere == EOF) {
-            fprintf(stderr, "Cabeçalho incompleto em %s\n", caminho);
+            fprintf(stderr, "Cabeçalho inválido em %s\n", caminho);
             fclose(arquivo);
             return 0;
         }
         if (caractere == '#') {
-            while ((caractere = fgetc(arquivo)) != '\n' && caractere != EOF) {
-            }
+            do {
+                caractere = fgetc(arquivo);
+            } while (caractere != '\n' && caractere != EOF);
         } else if (caractere != ' ' && caractere != '\t' && caractere != '\n' && caractere != '\r') {
             break;
         }
@@ -125,7 +126,7 @@ int ler_pgm(const char *caminho, Imagem *imagem) {
     fgetc(arquivo); // \n depois do cabeçalho
 
     if (largura <= 0 || altura <= 0 || valor_maximo != 255) {
-        fprintf(stderr, "PGM não suportado em %s: dimensões positivas e valor máximo 255 são exigidos\n", caminho);
+        fprintf(stderr, "PGM não suportado: %s\n", caminho);
         fclose(arquivo);
         return 0;
     }
@@ -133,12 +134,12 @@ int ler_pgm(const char *caminho, Imagem *imagem) {
     size_t total_pixels = (size_t)largura * altura;
     unsigned char *pixels = malloc(total_pixels);
     if (!pixels) {
-        fprintf(stderr, "Memória insuficiente para %s\n", caminho);
+        fprintf(stderr, "Erro de alocação ao ler %s\n", caminho);
         fclose(arquivo);
         return 0;
     }
     if (fread(pixels, 1, total_pixels, arquivo) != total_pixels) {
-        fprintf(stderr, "Arquivo %s incompleto (faltam pixels)\n", caminho);
+        fprintf(stderr, "Erro ao ler os pixels de %s\n", caminho);
         free(pixels);
         fclose(arquivo);
         return 0;
@@ -160,14 +161,13 @@ int escrever_pgm(const char *caminho, const unsigned char *pixels, int largura, 
     }
     size_t total_pixels = (size_t)largura * altura;
     fprintf(arquivo, "P5\n%d %d\n255\n", largura, altura);
-    int sucesso = (fwrite(pixels, 1, total_pixels, arquivo) == total_pixels);
-    if (fclose(arquivo) != 0) {
-        sucesso = 0;
-    }
-    if (!sucesso) {
+    size_t gravados = fwrite(pixels, 1, total_pixels, arquivo);
+    fclose(arquivo);
+    if (gravados != total_pixels) {
         fprintf(stderr, "Erro ao gravar %s\n", caminho);
+        return 0;
     }
-    return sucesso;
+    return 1;
 }
 
 // Hash FNV-1a do resultado, o mesmo do sequencial, para comparar as versões
@@ -293,18 +293,14 @@ void trocar_halos(const AreaTrabalho *area, unsigned char *buffer, int largura, 
     unsigned char *ultimas_proprias = buffer + (size_t)(area->halo_cima + area->num_linhas - area->linhas_enviar_baixo) * largura;
     unsigned char *halo_de_baixo = buffer + (size_t)(area->halo_cima + area->num_linhas) * largura;
 
-    int tem_vizinho_cima = (rank > 0);
-    int tem_vizinho_baixo = (rank < num_processos - 1);
-
-    int conversar_com_baixo_primeiro = (rank % 2 == 0);
     for (int etapa = 0; etapa < 2; etapa++) {
-        int falar_com_baixo = (etapa == 0) ? conversar_com_baixo_primeiro : !conversar_com_baixo_primeiro;
-        if (falar_com_baixo && tem_vizinho_baixo) {
+        int com_baixo = (etapa == 0) == (rank % 2 == 0);
+        if (com_baixo && rank < num_processos - 1) {
             trocar_com_vizinho(rank + 1,
                                ultimas_proprias, area->linhas_enviar_baixo * largura,
                                halo_de_baixo, area->halo_baixo * largura,
                                TAG_HALO_PARA_BAIXO, TAG_HALO_PARA_CIMA, 1);
-        } else if (!falar_com_baixo && tem_vizinho_cima) {
+        } else if (!com_baixo && rank > 0) {
             trocar_com_vizinho(rank - 1,
                                primeiras_proprias, area->linhas_enviar_cima * largura,
                                halo_de_cima, area->halo_cima * largura,
@@ -412,33 +408,27 @@ int verificar_resultados(const char *pasta_saida, const char *pasta_referencia, 
         }
 
         if (imagem_paralela.largura != imagem_referencia.largura || imagem_paralela.altura != imagem_referencia.altura) {
-            printf("VERIFICAÇÃO frame %d: FALHA - dimensões diferentes\n", indice);
+            printf("Frame %d: dimensões diferentes\n", indice);
             tudo_igual = 0;
         } else {
             size_t total_pixels = (size_t)imagem_paralela.largura * imagem_paralela.altura;
-            size_t total_diferencas = 0;
-            size_t primeira_diferenca = 0;
+            size_t diferencas = 0;
             for (size_t posicao = 0; posicao < total_pixels; posicao++) {
                 if (imagem_paralela.pixels[posicao] != imagem_referencia.pixels[posicao]) {
-                    if (total_diferencas == 0) {
-                        primeira_diferenca = posicao;
-                    }
-                    total_diferencas++;
+                    diferencas++;
                 }
             }
-            if (total_diferencas == 0) {
-                printf("VERIFICAÇÃO frame %d: OK - imagens idênticas\n", indice);
+            if (diferencas == 0) {
+                printf("Frame %d: igual ao sequencial\n", indice);
             } else {
-                printf("VERIFICAÇÃO frame %d: FALHA - %zu pixel(s) diferente(s); primeira diferença em (linha %zu, coluna %zu)\n",
-                       indice, total_diferencas, primeira_diferenca / imagem_paralela.largura,
-                       primeira_diferenca % imagem_paralela.largura);
+                printf("Frame %d: %zu pixels diferentes\n", indice, diferencas);
                 tudo_igual = 0;
             }
         }
         free(imagem_paralela.pixels);
         free(imagem_referencia.pixels);
     }
-    printf(tudo_igual ? "VERIFICAÇÃO: TODOS OS FRAMES IDÊNTICOS AO SEQUENCIAL\n" : "VERIFICAÇÃO: HÁ DIFERENÇAS EM RELAÇÃO AO SEQUENCIAL\n");
+    printf(tudo_igual ? "Verificação OK\n" : "Verificação falhou\n");
     return tudo_igual;
 }
 
@@ -512,7 +502,7 @@ int main(int argc, char **argv) {
 
     if (altura < num_processos) {
         if (rank == 0) {
-            fprintf(stderr, "Há mais processos (%d) do que linhas na imagem (%d)\n", num_processos, altura);
+            fprintf(stderr, "Mais processos (%d) do que linhas na imagem (%d)\n", num_processos, altura);
         }
         free(frame.pixels);
         MPI_Finalize();
@@ -526,7 +516,7 @@ int main(int argc, char **argv) {
 
     AreaTrabalho area; // Reaproveitada em todos os frames
     if (!preparar_area(&area, rank, num_processos, largura, altura, bloco)) {
-        fprintf(stderr, "Processo %d: memória insuficiente para os buffers\n", rank);
+        fprintf(stderr, "Processo %d: erro de alocação\n", rank);
         MPI_Finalize();
         return 1;
     }
@@ -534,7 +524,7 @@ int main(int argc, char **argv) {
     if (rank == 0) {
         imagem_resultado = malloc(total_pixels);
         if (!imagem_resultado) {
-            fprintf(stderr, "Memória insuficiente para a imagem de resultado\n");
+            fprintf(stderr, "Erro de alocação\n");
             liberar_area(&area);
             free(frame.pixels);
             MPI_Finalize();
@@ -603,9 +593,9 @@ int main(int argc, char **argv) {
 
     if (rank == 0) {
         printf("Frames: %d de %dx%d pixels\n", frames_processados, largura, altura);
-        printf("Vídeo processado em %.6f s (%d frames, paralelo MPI, %d processos, bloco %d, %d iterações; %.2f frames/s)\n",
+        printf("Vídeo processado em %.6f s (%d frames, %d processos, bloco %d, %d iterações, %.2f frames/s)\n",
                tempo_total, frames_processados, num_processos, bloco, num_iteracoes, frames_processados / tempo_total);
-        printf("Tempo por etapa (processo 0): leitura %.3f s, distribuição %.3f s, cálculo %.3f s, troca de halos %.3f s, coleta %.3f s, escrita %.3f s\n",
+        printf("Tempos do processo 0: leitura %.3f s, distribuição %.3f s, cálculo %.3f s, halos %.3f s, coleta %.3f s, escrita %.3f s\n",
                tempo_leitura, tempo_distribuicao, tempo_calculo, tempo_comunicacao, tempo_coleta, tempo_escrita);
         printf("Checksum do resultado: %08x\n", (unsigned)checksum);
         printf("Imagens salvas em %s/blur_*.pgm\n", pasta_saida);

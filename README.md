@@ -78,7 +78,7 @@ mpirun -np 4 ./blur_par -v ref 100 saida_par frame1.pgm frame2.pgm
 ```
 
 Depois de medir o tempo, o processo 0 compara cada `blur_NNNN.pgm` gerado com o
-do sequencial (pixel a pixel) e imprime OK ou a primeira diferença. O código de
+do sequencial (pixel a pixel) e imprime quantos pixels diferem. O código de
 saída é 1 se houver diferença. Também dá para comparar com `cmp` e pelo
 `Checksum do resultado`, que é igual nas duas versões.
 
