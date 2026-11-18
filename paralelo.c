@@ -199,8 +199,14 @@ void executar_blur(AreaTrabalho *area, int largura, int altura, int rank, int nu
     unsigned char *buffer_atual = area->buffer_atual;
     unsigned char *buffer_novo = area->buffer_novo;
 
-    int primeira = (area->linha_inicial == 0) ? 2 : 1;
-    int ultima = (area->linha_inicial + area->num_linhas == altura) ? area->num_linhas - 1 : area->num_linhas;
+    int primeira = 1;
+    int ultima = area->num_linhas;
+    if (area->linha_inicial == 0) {
+        primeira = 2;
+    }
+    if (area->linha_inicial + area->num_linhas == altura) {
+        ultima = area->num_linhas - 1;
+    }
 
     for (int iteracao = 0; iteracao < num_iteracoes; iteracao++) {
         double inicio = agora();
@@ -322,7 +328,10 @@ int main(int argc, char **argv) {
     calcular_faixa(rank, num_processos, altura, &area.linha_inicial, &area.num_linhas);
     area.buffer_atual = calloc((size_t)(area.num_linhas + 2) * largura, 1);
     area.buffer_novo = calloc((size_t)(area.num_linhas + 2) * largura, 1);
-    unsigned char *imagem_resultado = (rank == 0) ? malloc(total_pixels) : NULL;
+    unsigned char *imagem_resultado = NULL; // Só o processo 0 monta a imagem final
+    if (rank == 0) {
+        imagem_resultado = malloc(total_pixels);
+    }
 
     double tempo_distribuicao = 0.0;
     double tempo_calculo = 0.0;
@@ -395,5 +404,8 @@ int main(int argc, char **argv) {
     free(imagem_resultado);
     free(frame.pixels);
     MPI_Finalize();
-    return execucao_com_sucesso ? 0 : 1;
+    if (!execucao_com_sucesso) {
+        return 1;
+    }
+    return 0;
 }
